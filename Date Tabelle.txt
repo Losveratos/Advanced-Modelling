@@ -1,0 +1,112 @@
+let
+    
+fn=(StartJahr, EndJahr, optional Culture, optional StartFiskaljahr)=>
+
+let
+/*
+StartJahr = 2017, 
+EndJahr = 2019, 
+Culture = "de-de", 
+StartFiskaljahr = "Feb", 
+*/
+    StartFiskJahr = if StartFiskaljahr = null then "Jan" else StartFiskaljahr,
+    GetStartDay = #date(StartJahr,1,1),
+    GetEndDay = #date(EndJahr,12,31),
+    GetCultureDefaultGermany = if Culture = null then "de-de" else Culture, 
+    DayCount = Duration.Days(Duration.From(GetEndDay - GetStartDay)) + 1, 
+    GetListOfDates = List.Dates(GetStartDay,DayCount,#duration(1,0,0,0)), 
+    TableFromList = Table.FromList(GetListOfDates, Splitter.SplitByNothing()),    
+    ChangedType = Table.TransformColumnTypes(TableFromList,{{"Column1", type date}}), 
+    Date = Table.RenameColumns(ChangedType,{{"Column1", "Datum"}}),
+    #"AddFull date Description" = Table.AddColumn(Date, "Volle Datumsbezeichnung", each Date.ToText([Datum], "dd. MMMM yyyy", Culture), type text),
+    AddWeekDaySort = Table.AddColumn(#"AddFull date Description", "Tag der Woche (Sort.)", each Date.DayOfWeek([Datum], Day.Monday) + 1, Int64.Type),
+    AddMonthDaySort = Table.AddColumn(AddWeekDaySort, "Tag des Monats (Sort.)", each Date.Day([Datum]), Int64.Type),
+    AddDayKey = Table.AddIndexColumn(AddMonthDaySort, "TagesKey", 1, 1),
+    #"GDTyp" = Table.TransformColumnTypes(AddDayKey,{{"TagesKey", Int64.Type}}),
+    AddDayName = Table.AddColumn(#"GDTyp", "Name des Tags_komplett", each Date.DayOfWeekName([Datum], Culture), type text),
+    AddDaysName2digits = Table.AddColumn(AddDayName, "Name des Tages_2Zeichen", each Date.ToText([Datum],"ddd", Culture), type text),
+    AddDaysName1digit = Table.AddColumn(AddDaysName2digits, "Name des Tages_1Zeichen", each Text.Start(Date.DayOfWeekName([Datum], Culture),1) & Text.Repeat(Character.FromNumber(8203), [#"Tag der Woche (Sort.)"]), type text),
+    WT_WE_flag = Table.AddColumn(AddDaysName1digit, "Wochentags_Flag", each if [#"Tag der Woche (Sort.)"] < 6 then "Weekday" else "Weekend", type text),
+    AddWeekOfYear = Table.AddColumn(WT_WE_flag, "Woche des Jahres (Sort.)", each Date.WeekOfYear([Datum]), Int64.Type),
+    AddYearWeek = Table.AddColumn(AddWeekOfYear, "JahrWoche", each Date.Year([Datum])*100+[#"Woche des Jahres (Sort.)"], Int64.Type),
+    TableWeekKey = /*List.Distinct(#"Geänderter Typ4"[YearWeek])*/ Table.AddIndexColumn(Table.TransformColumnTypes(Table.RenameColumns(Table.FromList(List.Sort(List.Distinct(AddYearWeek[JahrWoche]),Order.Ascending), Splitter.SplitByNothing(), null, null, ExtraValues.Error),{{"Column1", "YearWeek"}}),{{"YearWeek", Int64.Type}}), "WeekKey", 1, 1),
+    AddWeeKey = Table.NestedJoin(AddYearWeek,{"JahrWoche"},TableWeekKey,{"YearWeek"},"WK",JoinKind.LeftOuter),
+    #"Expanded WK" = Table.ExpandTableColumn(AddWeeKey, "WK", {"WeekKey"}, {"WochenKey"}),
+    RemovedYearWeek = Table.RemoveColumns(#"Expanded WK",{"JahrWoche"}),
+    AddWeekName = Table.AddColumn(RemovedYearWeek, "Wochenname", each "KW"&Text.PadStart(Number.ToText([#"Woche des Jahres (Sort.)"]),2,"0") &" "&Number.ToText(Date.Year([Datum])), type text),
+    fnGetIsoWeekNumber = (MyDate as date) =>
+      //Source --> https://blogs.office.com/en-us/2009/06/30/week-numbers-in-excel/
+    let
+      //MyDate = #date(2016,1,3),
+      Part1 = Number.From(MyDate) - Number.From(#date(Date.Year(Date.From(Number.From(MyDate) - (Date.DayOfWeek(Date.AddDays(MyDate,-1), Day.Sunday) + 1) + 4)),1,3)),
+      Part2 = Date.DayOfWeek(#date(Date.Year(Date.From(Number.From(MyDate) - (Date.DayOfWeek(Date.AddDays(MyDate,-1), Day.Sunday) +1) + 4)),1,3), Day.Sunday)+1 + 5,
+      ISOWeekNumber = Number.IntegerDivide(Part1 + Part2, 7)
+    in
+      ISOWeekNumber,
+    AddIsoWeek = Table.AddColumn(AddWeekName, "IsoKalenderwoche des Jahres (Sort.)", each fnGetIsoWeekNumber([Datum]), Int64.Type),
+    AddIsoYear = Table.AddColumn(AddIsoWeek,"IsoJahr",each Date.Year(Date.AddDays([Datum],3 - Date.DayOfWeek([Datum], 1))), Int64.Type),
+    AddISOYearWeekName = Table.AddColumn(AddIsoYear, "Iso_Kalenderwochenname", each Text.From([IsoJahr]) &  " KW" & Text.PadStart(Text.From([#"IsoKalenderwoche des Jahres (Sort.)"]),2,"0") , type text),
+    GetIsoKalenderwochenKey = Table.AddIndexColumn( Table.Distinct( Table.SelectColumns(AddISOYearWeekName, {"Iso_Kalenderwochenname"}), {"Iso_Kalenderwochenname"}), "IsoKalenderwochenKey", 1, 1),
+    AddIsoKalenderwochenKey = Table.AddJoinColumn(AddISOYearWeekName, {"Iso_Kalenderwochenname"}, GetIsoKalenderwochenKey, {"Iso_Kalenderwochenname"}, "NEU"),
+    ExpandIsoKalenderwochenKey = Table.ExpandTableColumn(AddIsoKalenderwochenKey, "NEU", {"IsoKalenderwochenKey"}, {"IsoKalenderwochenKey"}),
+    AddMonthSort = Table.AddColumn(ExpandIsoKalenderwochenKey, "Monat (Sort.)", each Date.Month([Datum]), Int64.Type),
+    AddMonthName = Table.AddColumn(AddMonthSort, "Monatsname", each Date.MonthName([Datum], Culture), type text),
+    AddMonthName3digits = Table.AddColumn(AddMonthName, "Monatsname_3Zeichen", each Date.ToText([Datum], "MMM", Culture), type text),
+    AddMonthName1digit = Table.AddColumn(AddMonthName3digits, "Monatsname_1Zeichen", each Text.Start(Date.MonthName([Datum], Culture),1) & Text.Repeat(Character.FromNumber(8203), [#"Monat (Sort.)"]), type text),
+    AddMonthNameShort_Year = Table.AddColumn(AddMonthName1digit, "Monatsname_3Zeichen_Jahr", each [Monatsname_3Zeichen] &" "& Number.ToText(Date.Year([Datum])), type text),
+    AddYearMonth = Table.TransformColumnTypes(Table.AddColumn(AddMonthNameShort_Year, "JahrMonat", each Date.Year([Datum])*100 + [#"Monat (Sort.)"]),{{"JahrMonat", Int64.Type}}),
+    TableYearMonth = Table.AddIndexColumn(Table.TransformColumnTypes(Table.RenameColumns(Table.FromList(List.Sort(List.Distinct(AddYearMonth[JahrMonat]),Order.Ascending), Splitter.SplitByNothing(), null, null, ExtraValues.Error),{{"Column1", "YearMonth"}}),{{"YearMonth", Int64.Type}}), "MonthKey", 1, 1),
+    #"Zusammenführte Abfragen" = Table.NestedJoin(AddYearMonth,{"JahrMonat"},TableYearMonth,{"YearMonth"},"MK",JoinKind.LeftOuter),
+    #"Erweiterte MK" = Table.ExpandTableColumn(#"Zusammenführte Abfragen", "MK", {"MonthKey"}, {"MonthKey"}),
+    AddSoM = Table.AddColumn(#"Erweiterte MK", "Monatsbeginn", each Date.StartOfMonth([Datum]), type date),
+    AddEoM = Table.AddColumn(AddSoM, "Monatsende", each Date.EndOfMonth([Datum]), type date),
+    AddQuarter = Table.AddColumn(AddEoM, "Quartal (Sort.)", each Date.QuarterOfYear([Datum]), Int64.Type),
+    AddQuarterYearName = Table.AddColumn(AddQuarter, "Quartalsname_Jahr", each "Q"&Number.ToText([#"Quartal (Sort.)"]) &" "&Number.ToText(Date.Year([Datum])), type text),
+    AddYearQuarter = Table.TransformColumnTypes(Table.AddColumn(AddQuarterYearName, "JahrQuartal", each Date.Year([Datum]) * 100 + [#"Quartal (Sort.)"]),{{"JahrQuartal", Int64.Type}}),
+    TableYearQuarter = Table.AddIndexColumn(Table.TransformColumnTypes(Table.RenameColumns(Table.FromList(List.Sort(List.Distinct(#"AddYearQuarter"[JahrQuartal]),Order.Ascending), Splitter.SplitByNothing(), null, null, ExtraValues.Error),{{"Column1", "YearQuarter"}}),{{"YearQuarter", Int64.Type}}), "QuartalKey", 1, 1),
+    GetQuartalKey = Table.NestedJoin(AddYearQuarter,{"JahrMonat"},TableYearQuarter,{"YearQuarter"},"QK",JoinKind.LeftOuter),
+    AddQuartalKey = Table.ExpandTableColumn(GetQuartalKey, "QK", {"QuartalKey"}, {"QuartalKey"}),
+    AddHalfYearSort = Table.TransformColumnTypes(Table.AddColumn(AddQuartalKey, "Halbjahr (Sort.)", each if Date.Month([Datum]) < 7 then 1 else 2),{{"Halbjahr (Sort.)", Int64.Type}}),
+    AddHalfYearName = Table.TransformColumnTypes(Table.AddColumn(AddHalfYearSort, "Halbjahresname", each "HJ"&Number.ToText([#"Halbjahr (Sort.)"])&" "&Number.ToText(Date.Year([Datum]))),{{"Halbjahresname", type text}}),
+    AddYearHalfYear = Table.TransformColumnTypes(Table.AddColumn(AddHalfYearName, "JahrHalbjahr", each Date.Year([Datum])*100+[#"Halbjahr (Sort.)"]),{{"JahrHalbjahr", Int64.Type}}),
+    TableYearHalfYear = Table.AddIndexColumn(Table.TransformColumnTypes(Table.RenameColumns(Table.FromList(List.Sort(List.Distinct(AddYearHalfYear[JahrHalbjahr]),Order.Ascending), Splitter.SplitByNothing(), null, null, ExtraValues.Error),{{"Column1", "YearHalfYear"}}),{{"YearHalfYear", Int64.Type}}), "HalfYearKey", 1, 1),
+    GetHalfYearKey = Table.NestedJoin(AddYearHalfYear,{"JahrHalbjahr"},TableYearHalfYear,{"YearHalfYear"},"HYK",JoinKind.LeftOuter),
+    AddHalfYearKey = Table.ExpandTableColumn(GetHalfYearKey, "HYK", {"HalfYearKey"}, {"HalfYearKey"}),
+    AddYear = Table.AddColumn(AddHalfYearKey, "Jahr", each Date.Year([Datum]), Int64.Type),
+    IsLeapYear = Table.TransformColumnTypes(Table.AddColumn(AddYear, "Schaltjahr", each Date.IsLeapYear( [Datum] )),{{"Schaltjahr", type logical}}),
+    
+    //==============================================================================Fiskaljahresberechnungen=================================================================
+    GetStartMonatsnummerFiskaljahr = List.PositionOf({"Jan", "Feb", "Mrz", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"}, StartFiskJahr ) + 1,
+    AddFiscalYear = Table.TransformColumnTypes(Table.AddColumn(IsLeapYear, "Fiskal_Jahr", each if Date.Month([Datum]) < GetStartMonatsnummerFiskaljahr then Date.Year([Datum]) -1 else Date.Year([Datum])),{{"Fiskal_Jahr", Int64.Type}}),
+    AddFiscalMonth = Table.TransformColumnTypes(Table.AddColumn(#"AddFiscalYear", "Fiskal_Monat (Sort.)", each if ( Date.Month([Datum]) >= GetStartMonatsnummerFiskaljahr) then Date.Month([Datum]) - GetStartMonatsnummerFiskaljahr +1 
+else 
+Date.Month([Datum])+13-GetStartMonatsnummerFiskaljahr),{{"Fiskal_Monat (Sort.)", Int64.Type}}),
+    AddFiscalYearMonth = Table.AddColumn(AddFiscalMonth, "Fiskal_JahrMonat", each [Fiskal_Jahr] * 100 + [#"Fiskal_Monat (Sort.)"], type number),
+    AddFiscalQuarter = Table.TransformColumnTypes(Table.AddColumn(AddFiscalYearMonth, "Fiskal_Quartal", each Number.RoundUp([#"Fiskal_Monat (Sort.)"]/3 ,0)), {{"Fiskal_Quartal", Int64.Type}}),
+    AddFiscalQuarterName = Table.AddColumn(AddFiscalQuarter, "Fiskal_Quartalsname", each Text.From([Fiskal_Jahr]) &" Q" & Text.From([Fiskal_Quartal]), type text),
+    AddFiscalYearQuarter = Table.AddColumn(AddFiscalQuarterName, "Fiskal_JahrQuartal", each [Fiskal_Jahr]* 100 + [Fiskal_Quartal], Int64.Type),
+    TableFiscalYearQuarter = Table.AddIndexColumn(Table.TransformColumnTypes(Table.RenameColumns(Table.FromList(List.Sort(List.Distinct(#"AddFiscalYearQuarter"[Fiskal_JahrQuartal]),Order.Ascending), Splitter.SplitByNothing(), null, null, ExtraValues.Error),{{"Column1", "Fiscal_YearQuarter"}}),{{"Fiscal_YearQuarter", Int64.Type}}), "Fiskal_QuartalKey", 1, 1),
+    GetFiscalYearQuarterKey = Table.NestedJoin(AddFiscalYearQuarter,{"Fiskal_JahrQuartal"},TableFiscalYearQuarter,{"Fiscal_YearQuarter"},"FYQ",JoinKind.LeftOuter),
+    #"Erweiterte FYQ" = Table.ExpandTableColumn(GetFiscalYearQuarterKey, "FYQ", {"Fiskal_QuartalKey"}, {"Fiskal_QuartalKey"}),
+    AddFiscalHalfYear = Table.TransformColumnTypes(Table.AddColumn(#"Erweiterte FYQ", "Fiskal_Halbjahr (Sort.)", each if [#"Fiskal_Monat (Sort.)"]<7 then 1 else 2), {{"Fiskal_Halbjahr (Sort.)", Int64.Type}}),
+    AddFiscalHalfYearName = Table.AddColumn(AddFiscalHalfYear, "Fiskal_Halbjahresname", each Text.From([Fiskal_Jahr]) & " H" & Text.From([#"Fiskal_Halbjahr (Sort.)"]), type text),
+    AddFiscalYearHalfYear = Table.AddColumn(AddFiscalHalfYearName, "Fiskal_JahrHalbjahr", each [Fiskal_Jahr] * 100 + [#"Fiskal_Halbjahr (Sort.)"], Int64.Type),
+    TableFiscalYearHalfYear = Table.AddIndexColumn(Table.TransformColumnTypes(Table.RenameColumns(Table.FromList(List.Sort(List.Distinct(#"AddFiscalYearHalfYear"[Fiskal_JahrHalbjahr]),Order.Ascending), Splitter.SplitByNothing(), null, null, ExtraValues.Error),{{"Column1", "Fiscal_YearHalfYear"}}),{{"Fiscal_YearHalfYear", Int64.Type}}), "Fiskal_HalbjahresKey", 1, 1),
+    GetFiscalYearHalfYearKey = Table.NestedJoin(AddFiscalYearHalfYear,{"Fiskal_JahrHalbjahr"},TableFiscalYearHalfYear,{"Fiscal_YearHalfYear"},"FYHY",JoinKind.LeftOuter),
+    #"Erweiterte FYHY" = Table.ExpandTableColumn(GetFiscalYearHalfYearKey, "FYHY", {"Fiskal_HalbjahresKey"}, {"Fiskal_HalbjahresKey"}),
+    //==============================================================================Fiskaljahresberechnungen=================================================================
+    Output = if StartFiskJahr = "Jan" then #"IsLeapYear"else #"Erweiterte FYHY"
+in
+    Output,
+    fnType = type function(
+              StartJahr as number,
+              EndJahr as number, 
+              optional Culture as (type text meta [Documentation.AllowedValues={"de-de", "en-US", "fr-FR", "es-ES"}]), 
+              optional StartFiskaljahr as (type text meta[Documentation.AllowedValues={"Jan", "Feb", "Mrz", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"}])
+               ) as table meta [
+                                Documentation.Name="fnCalendar",
+                                Documentation.LongDescription="Diese Funktion erstellt eine Kalendertabelle, angelehnt an den Vorschlägen der Kimball-Group.",
+                                Documentation.Author="Lars Schreiber, ssbi-blog.de"
+                              ]
+in
+Value.ReplaceType(fn, fnType)
